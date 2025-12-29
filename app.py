@@ -65,7 +65,7 @@ def save_user_role(role_name):
 
 # streamlit page setup
 st.set_page_config(page_title="Healthcare AI", layout="wide")
-st.title("Healthcare RAG Chatbot")
+st.title("Healthcare RAG Assistant")
 
 
 # load environment variables
@@ -73,10 +73,13 @@ load_dotenv()
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
 
 
-
 # sidebar ui
 roles = load_roles()
 saved_role = load_user_role()
+
+# initialize ui state flags
+if "show_history" not in st.session_state:
+    st.session_state.show_history = True
 
 with st.sidebar:
     st.header("user role settings")
@@ -124,6 +127,13 @@ with st.sidebar:
             save_roles(roles)
             st.success(f"role '{new_role_name}' added")
             st.rerun()
+
+    st.header("User Chat History")
+
+    toggle_label = "hide chat history" if st.session_state.show_history else "show chat history"
+
+    if st.button(toggle_label):
+        st.session_state.show_history = not st.session_state.show_history
 
 
 
@@ -173,8 +183,6 @@ for file in uploaded_files:
     st.success(f"Uploaded and ingested: {file.name}")
 
 
-
-
 # initialize agent only once ****
 
 # streamlit reruns the script on every interaction
@@ -183,6 +191,8 @@ if "active_role" not in st.session_state:
     st.session_state.active_role = selected_role
 
 if ("agent" not in st.session_state or st.session_state.active_role != selected_role):
+
+    st.session_state.active_role = selected_role
 
     # in-memory saver stores conversation state
     checkpointer = InMemorySaver()
@@ -208,127 +218,15 @@ if ("agent" not in st.session_state or st.session_state.active_role != selected_
         print(f"Retrieved {len(retrieved_docs)} documents for query: {query}")
         print(serialized)
         return serialized, retrieved_docs
-     
-    # # before-agent medical guardrail
-    # class MedicalInputGuardrail(AgentMiddleware):
-    #     # deterministic guardrail to block diagnosis and treatment requests
 
-    #     def __init__(self):
-    #         super().__init__()
-    #         self.blocked_keywords = [
-    #             "diagnose",
-    #             "diagnosis",
-    #             "treat",
-    #             "treatment",
-    #             "prescribe",
-    #             "prescription",
-    #             "dosage",
-    #             "dose",
-    #             "medicine for me",
-    #             "should i take",
-    #         ]
+    class RoleToneGuardrail(AgentMiddleware):
+        # ensures response tone matches active role
 
-    #     @hook_config(can_jump_to=["end"])
-    #     def before_agent(
-    #         self,
-    #         state: AgentState,
-    #         runtime: Runtime,
-    #     ) -> dict[str, Any] | None:
-
-    #         # ensure there is at least one message
-    #         if not state["messages"]:
-    #             return None
-
-    #         first_message = state["messages"][0]
-
-    #         # only inspect human messages
-    #         if first_message.type != "human":
-    #             return None
-
-    #         content = first_message.content.lower()
-
-    #         # block unsafe medical intent
-    #         for keyword in self.blocked_keywords:
-    #             if keyword in content:
-    #                 return {
-    #                     "messages": [
-    #                         {
-    #                             "role": "assistant",
-    #                             "content": (
-    #                                 "i am not a medical professional and cannot provide diagnoses, "
-    #                                 "treatments, or prescriptions. please consult a licensed healthcare provider."
-    #                             ),
-    #                         }
-    #                     ],
-    #                     "jump_to": "end",
-    #                 }
-
-    #         return None
-
-    # # after-agent medical guardrail
-    # class MedicalOutputGuardrail(AgentMiddleware):
-    #     # model-based safety scan for medical advice leakage
-
-    #     def __init__(self):
-    #         super().__init__()
-    #         self.safety_model =  ChatGroq(model_name="openai/gpt-oss-120b",temperature=0.7,)
-
-    #     @hook_config(can_jump_to=["end"])
-    #     def after_agent(
-    #         self,
-    #         state: AgentState,
-    #         runtime: Runtime,
-    #     ) -> dict[str, Any] | None:
-
-    #         # ensure there is a final message
-    #         if not state["messages"]:
-    #             return None
-
-    #         last_message = state["messages"][-1]
-
-    #         if not isinstance(last_message, AIMessage):
-    #             return None
-
-    #         # llm-based medical safety check
-    #         safety_prompt = f"""
-    #         you are a healthcare compliance checker.
-    #         respond only with SAFE or UNSAFE.
-
-    #         unsafe if the response:
-    #         - gives diagnosis
-    #         - recommends treatment
-    #         - suggests medication or dosage
-    #         - replaces a medical professional
-
-    #         response:
-    #         {last_message.content}
-    #         """
-
-    #         result = self.safety_model.invoke(
-    #             [{"role": "user", "content": safety_prompt}]
-    #         )
-
-    #         if "UNSAFE" in result.content:
-    #             last_message.content = (
-    #                 "i cannot provide medical advice. "
-    #                 "this information is for educational purposes only. "
-    #                 "please consult a qualified healthcare professional."
-    #             )
-
-    #         # enforce medical disclaimer
-    #         if "educational purposes only" not in last_message.content.lower():
-    #             last_message.content += (
-    #                 "\n\nthis information is for educational purposes only "
-    #                 "and is not a substitute for professional medical advice."
-    #             )
-
-    #         return None
-
-    class RelevanceGuardrail(AgentMiddleware):
-    # model-based guardrail to ensure answer matches user query intent
-        def __init__(self):
+        def __init__(self, active_role: str, active_role_prompt: str):
             super().__init__()
-            self.judge_model = init_chat_model("gpt-4o-mini")
+            self.active_role = active_role
+            self.active_role_prompt = active_role_prompt
+            self.judge = model = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.7,)
 
         @hook_config(can_jump_to=["end"])
         def after_agent(
@@ -337,46 +235,40 @@ if ("agent" not in st.session_state or st.session_state.active_role != selected_
             runtime: Runtime,
         ) -> dict[str, Any] | None:
 
-            # ensure we have enough messages
-            if len(state["messages"]) < 2:
+            ai_msg = state["messages"][-1]
+
+            if not isinstance(ai_msg, AIMessage):
                 return None
 
-            user_message = state["messages"][0]
-            last_message = state["messages"][-1]
+            prompt = f"""
+            CHECK IF THE AI RESPONSE MATCHES THE EXPECTED TONE FOR THE ROLE.
 
-            # ensure correct message types
-            if user_message.type != "human":
-                return None
+            ROLE:
+            {self.active_role}
 
-            if not isinstance(last_message, AIMessage):
-                return None
+            ROLE RULES WHICH ARE MANDATORY TO FOLLOW:
+            {self.active_role_prompt}
+            
+            AI RESPONSE:
+            {ai_msg.content}
 
-            # relevance evaluation prompt
-            relevance_prompt = f"""
-    determine whether the assistant response is relevant to the user query.
+            RESPOND WITH ONLY ONE WORD:
+            MATCH
+            OR
+            MISMATCH
+            """
+            verdict = self.judge.invoke(
+                [{"role": "user", "content": prompt}]
+            ).content.strip().upper()
 
-    user query:
-    {user_message.content}
-
-    assistant response:
-    {last_message.content}
-
-    respond with only one word:
-    RELEVANT or IRRELEVANT
-    """
-
-            judgment = self.judge_model.invoke(
-                [{"role": "user", "content": relevance_prompt}]
-            )
-
-            # handle irrelevant responses
-            if "IRRELEVANT" in judgment.content.upper():
-                last_message.content = (
-                    "i may have misunderstood your question. "
-                    "could you please clarify what information you are looking for?"
+            if verdict == "MISMATCH":
+                ai_msg.content = (
+                    f"Let me rephrase this in a way that better suits a {self.active_role}:\n\n"
+                    + ai_msg.content
                 )
 
             return None
+
     # agent setup with guardrails
 
     # get active role prompt
@@ -384,6 +276,7 @@ if ("agent" not in st.session_state or st.session_state.active_role != selected_
 
     # build final system prompt
     system_prompt = (
+        f"Current user role is as follows: {st.session_state.active_role}\n\n"
         f"{active_role_prompt}\n\n"
         "You have access to a tool called retrieve_context.\n"
         "For any healthcare or document-based question, you MUST call retrieve_context first.\n"
@@ -402,16 +295,10 @@ if ("agent" not in st.session_state or st.session_state.active_role != selected_
                 trigger=("tokens", 4000),
                 keep=("messages", 20)
             ),
-            # MedicalInputGuardrail(),
-            # layer 2: pii protection (healthcare-safe default)
-            PIIMiddleware("email", strategy="redact", apply_to_input=True),
-            PIIMiddleware("ip", strategy="block", apply_to_input=True),
-            # MedicalOutputGuardrail(),
+            RoleToneGuardrail(active_role=st.session_state.active_role, active_role_prompt=active_role_prompt),
         ],
         checkpointer=checkpointer,
     )
-
-    st.session_state.active_role = selected_role
 
 
 # langgraph thread config
@@ -423,11 +310,11 @@ config: RunnableConfig = {
     }
 }
 
-# display previous messages
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
+# display previous messages only if enabled
+if st.session_state.show_history:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
 # chat input
 if query := st.chat_input("say something"):
